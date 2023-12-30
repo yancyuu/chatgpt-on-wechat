@@ -20,6 +20,9 @@ available_setting = {
     "use_azure_chatgpt": False,  # 是否使用azure的chatgpt
     "azure_deployment_id": "",  # azure 模型部署名称
     "azure_api_version": "",  # azure api版本
+    "use_lazyai": False, #是否使用lazyai，这里的chat如果启用，是最高的
+    "lazyai_api_base": "", # 如果使用lazyai，需要填写url
+    "lazyai_api_key": "", # 如果使用lazyai，需要填写apikey
     # Bot触发配置
     "single_chat_prefix": ["bot", "@bot"],  # 私聊时文本需要包含该前缀才能触发机器人回复
     "single_chat_reply_prefix": "[bot] ",  # 私聊时自动回复的前缀，用于区分真人
