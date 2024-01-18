@@ -140,7 +140,7 @@ class LazyAIBot(Bot):
                     # server error, need retry
                     time.sleep(2)
                     logger.warn(f"[LazyAI] do retry, times={retry_count}")
-                    return self._chat(query, content, retry_count + 1)
+                    return self._chat(query, context, retry_count + 1)
 
                 return Reply(ReplyType.TEXT, "提问太快啦，请休息一下再问我吧")
 
@@ -149,7 +149,7 @@ class LazyAIBot(Bot):
             # retry
             time.sleep(2)
             logger.warn(f"[LazyAI] do retry, times={retry_count}")
-            return self._chat(query, content, retry_count + 1)
+            return self._chat(query, context, retry_count + 1)
 
     def _build_vision_msg(self, query: str, path: str):
         try:
