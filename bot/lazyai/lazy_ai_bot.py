@@ -2,6 +2,7 @@
 # docs: https://doc.fastgpt.in/docs/development/openapi/auth/
 
 import re
+import os
 import time
 import requests
 import config
@@ -25,10 +26,19 @@ class LazyAIBot(Bot):
     def __init__(self):
         super().__init__()
         self.args = {}
+        self.sessions = LazyAISessionManager(LazyAISession, model=conf().get("model") or "gpt-3.5-turbo")
+
 
     def reply(self, query, context: Context = None) -> Reply:
         if context.type == ContextType.TEXT:
             return self._chat(query, context)
+        elif context.type == ContextType.IMAGE:
+            # 文件处理
+            context.get("msg").prepare()
+            file_path = context.content
+            if not self.check_file(file_path, self.sum_config):
+                return
+            return self.summary_pic(file_path)
         elif context.type == ContextType.IMAGE_CREATE:
             if not conf().get("text_to_image"):
                 logger.warn("[LazyAI] text_to_image is not enabled, ignore the IMAGE_CREATE request")
@@ -42,6 +52,26 @@ class LazyAIBot(Bot):
         else:
             reply = Reply(ReplyType.ERROR, "Bot不支持处理{}类型的消息".format(context.type))
             return reply
+        
+    def check_file(self, file_path: str, sum_config: dict) -> bool:
+        file_size = os.path.getsize(file_path) // 1000
+        if (sum_config.get("max_file_size") and file_size > sum_config.get("max_file_size")) or file_size > 15000:
+            logger.warn(f"[LinkSum] file size exceeds limit, No processing, file_size={file_size}KB")
+            return False
+
+        suffix = file_path.split(".")[-1]
+        support_list = ["txt", "csv", "docx", "pdf", "md", "jpg", "jpeg", "png"]
+        if suffix not in support_list:
+            logger.warn(f"[LinkSum] unsupported file, suffix={suffix}, support_list={support_list}")
+            return False
+
+        return True
+    
+    def summary_pic(self, file_path, content):
+        
+        file_body = f'img-block
+        {"src":"{file_path}"}'
+        return self._chat(file_body, content)
 
     def _chat(self, query, context, retry_count=0) -> Reply:
         """
@@ -58,8 +88,22 @@ class LazyAIBot(Bot):
 
         try:
             lazyai_api_key = conf().get("lazyai_api_key")
-
             session_id = context["session_id"]
+            session_message = self.sessions.session_msg_query(query, session_id)
+            logger.debug(f"[LazyAI] session={session_message}, session_id={session_id}")
+
+            # image process
+            img_cache = memory.USER_IMAGE_CACHE.get(session_id)
+            if img_cache:
+                messages = self._process_image_msg(session_id=session_id, query=query, img_cache=img_cache)
+                if messages:
+                    session_message = messages
+
+            model = conf().get("model")
+            # remove system message
+            if session_message[0].get("role") == "system":
+                if model == "wenxin":
+                    session_message.pop(0)
             logger.debug(f"[LazyAI] session_id={session_id}")
             body = {
                 "chatId" : session_id,
@@ -96,7 +140,7 @@ class LazyAIBot(Bot):
                     # server error, need retry
                     time.sleep(2)
                     logger.warn(f"[LazyAI] do retry, times={retry_count}")
-                    return self._chat(query, context, retry_count + 1)
+                    return self._chat(query, content, retry_count + 1)
 
                 return Reply(ReplyType.TEXT, "提问太快啦，请休息一下再问我吧")
 
@@ -105,43 +149,7 @@ class LazyAIBot(Bot):
             # retry
             time.sleep(2)
             logger.warn(f"[LazyAI] do retry, times={retry_count}")
-            return self._chat(query, context, retry_count + 1)
-
-    def _process_image_msg(self, app_code: str, session_id: str, query:str, img_cache: dict):
-        try:
-            enable_image_input = False
-            app_info = self._fetch_app_info(app_code)
-            if not app_info:
-                logger.debug(f"[LazyAI] not found app, can't process images, app_code={app_code}")
-                return None
-            plugins = app_info.get("data").get("plugins")
-            for plugin in plugins:
-                if plugin.get("input_type") and "IMAGE" in plugin.get("input_type"):
-                    enable_image_input = True
-            if not enable_image_input:
-                return
-            msg = img_cache.get("msg")
-            path = img_cache.get("path")
-            msg.prepare()
-            logger.info(f"[LazyAI] query with images, path={path}")
-            messages = self._build_vision_msg(query, path)
-            memory.USER_IMAGE_CACHE[session_id] = None
-            return messages
-        except Exception as e:
-            logger.exception(e)
-
-    def _find_group_mapping_code(self, context):
-        try:
-            if context.kwargs.get("isgroup"):
-                group_name = context.kwargs.get("msg").from_user_nickname
-                if config.plugin_config and config.plugin_config.get("Lazyai"):
-                    Lazyai_config = config.plugin_config.get("Lazyai")
-                    group_mapping = Lazyai_config.get("group_app_map")
-                    if group_mapping and group_name:
-                        return group_mapping.get(group_name)
-        except Exception as e:
-            logger.exception(e)
-            return None
+            return self._chat(query, content, retry_count + 1)
 
     def _build_vision_msg(self, query: str, path: str):
         try:
@@ -189,7 +197,7 @@ class LazyAIBot(Bot):
             }
             if self.args.get("max_tokens"):
                 body["max_tokens"] = self.args.get("max_tokens")
-            headers = {"Authorization": "Bearer " +  conf().get("Lazyai_api_key")}
+            headers = {"Authorization": "Bearer " +  conf().get("lazyai_api_key")}
 
             # do http request
             base_url = conf().get("lazyai_api_base", "https://api.lazygpt.cn")
@@ -232,24 +240,13 @@ class LazyAIBot(Bot):
             logger.warn(f"[LazyAI] do retry, times={retry_count}")
             return self.reply_text(session, app_code, retry_count + 1)
 
-    def _fetch_app_info(self, app_code: str):
-        headers = {"Authorization": "Bearer " + conf().get("Lazyai_api_key")}
-        # do http request
-        base_url = conf().get("Lazyai_api_base", "https://api.Lazy-ai.chat")
-        params = {"app_code": app_code}
-        res = requests.get(url=base_url + "/v1/app/info", params=params, headers=headers, timeout=(5, 10))
-        if res.status_code == 200:
-            return res.json()
-        else:
-            logger.warning(f"[LazyAI] find app info exception, res={res}")
-
     def create_img(self, query, retry_count=0, api_key=None):
-        '''画画还是用linkai'''
+        '''画画还是用LazyAI'''
         try:
             logger.info("[LazyImage] image_query={}".format(query))
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {conf().get('Lazyai_api_key')}"
+                "Authorization": f"Bearer {conf().get('LazyAI_api_key')}"
             }
             data = {
                 "prompt": query,
@@ -277,6 +274,18 @@ class LazyAIBot(Bot):
             return url_pattern.sub(replace_markdown_url, text)
         except Exception as e:
             logger.error(e)
+    
+    def _process_image_msg(self, session_id: str, query:str, img_cache: dict):
+        try:
+            msg = img_cache.get("msg")
+            path = img_cache.get("path")
+            msg.prepare()
+            logger.info(f"[LazyAI] query with images, path={path}")
+            messages = self._build_vision_msg(query, path)
+            memory.USER_IMAGE_CACHE[session_id] = None
+            return messages
+        except Exception as e:
+            logger.exception(e)
 
 class LazyAISessionManager(SessionManager):
     def session_msg_query(self, query, session_id):
@@ -297,3 +306,38 @@ class LazyAISessionManager(SessionManager):
             logger.warning("Exception when counting tokens precisely for session: {}".format(str(e)))
         return session
 
+class LazyAISessionManager(SessionManager):
+    def session_msg_query(self, query, session_id):
+        session = self.build_session(session_id)
+        messages = session.messages + [{"role": "user", "content": query}]
+        return messages
+
+    def session_reply(self, reply, session_id, total_tokens=None, query=None):
+        session = self.build_session(session_id)
+        if query:
+            session.add_query(query)
+        session.add_reply(reply)
+        try:
+            max_tokens = conf().get("conversation_max_tokens", 2500)
+            tokens_cnt = session.discard_exceeding(max_tokens, total_tokens)
+            logger.debug(f"[LazyAI] chat history, before tokens={total_tokens}, now tokens={tokens_cnt}")
+        except Exception as e:
+            logger.warning("Exception when counting tokens precisely for session: {}".format(str(e)))
+        return session
+
+
+class LazyAISession(ChatGPTSession):
+    def calc_tokens(self):
+        if not self.messages:
+            return 0
+        return len(str(self.messages))
+
+    def discard_exceeding(self, max_tokens, cur_tokens=None):
+        cur_tokens = self.calc_tokens()
+        if cur_tokens > max_tokens:
+            for i in range(0, len(self.messages)):
+                if i > 0 and self.messages[i].get("role") == "assistant" and self.messages[i - 1].get("role") == "user":
+                    self.messages.pop(i)
+                    self.messages.pop(i - 1)
+                    return self.calc_tokens()
+        return cur_tokens
