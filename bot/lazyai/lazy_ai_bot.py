@@ -68,9 +68,7 @@ class LazyAIBot(Bot):
         return True
     
     def summary_pic(self, file_path, content):
-        
-        file_body = f'img-block
-        {"src":"{file_path}"}'
+        file_body = f'img-block{"src":"{file_path}"}'
         return self._chat(file_body, content)
 
     def _chat(self, query, context, retry_count=0) -> Reply:
